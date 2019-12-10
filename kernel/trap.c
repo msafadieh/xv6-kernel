@@ -30,26 +30,31 @@ trapinithart(void)
 }
 
 void
-handlecow(pagetable_t pt, pte_t* pte, uint64 va) {
-  int flags = PTE_FLAGS((*pte ^ PTE_C) | PTE_W);
-  uint64 mem;
-  uint64 pa;
+handlecow(pagetable_t pagetable, pte_t* pte, uint64 va) {
+  uint64 new;
+  uint64 old;
 
-  pa = PTE2PA(*pte);
-  mem = (uint64) kalloc();
+  // switch off COW flag and switch on write flag
+  int flags = (PTE_FLAGS(*pte) ^ PTE_C) | PTE_W;
 
-  if (!mem) {
-    panic("kalloc\n");
+  // get old PA and allocate new page
+  old = PTE2PA(*pte);
+  new = (uint64) kalloc();
+
+  if (!new) {
+    panic("kalloc");
   }
 
-  memmove((char*)mem, (char*)pa, PGSIZE);
+  // copy memory from old to new
+  memmove((char*)new, (char*)old, PGSIZE);
 
-  *pte = *pte & ~PTE_V;
-  if (mappages(pt, va, PGSIZE, mem, flags)) {
-    panic("kalloc\n");
+  // map PTE to new PA 
+  if (mappages(pagetable, va, PGSIZE, new, flags)) {
+    panic("mappages");
   }
 
-  decrease_reference(pa);
+  // decrease reference to old PA
+  decrease_reference(old);
 
 }
 
@@ -90,16 +95,18 @@ usertrap(void)
 
     syscall();
 
-  } else if(((r_scause() == 13) || (r_scause() == 15)) && PGROUNDDOWN(r_stval()) < MAXVA) {
+  } else if((r_scause() == 13) || (r_scause() == 15)) {
+    p->killed = 1;
     uint64 va = PGROUNDDOWN(r_stval());
-    pte_t* pte = walk(p->pagetable, va, 0);
 
-    
-    if (pte && (*pte & PTE_C)) {
-      handlecow(p->pagetable, pte, va);
-    } else {
-      p->killed = 1;
+    if (va < MAXVA) {
+      pte_t* pte = walk(p->pagetable, va, 0);
+      if (pte && (*pte & PTE_C)) {
+        handlecow(p->pagetable, pte, va);
+        p->killed = 0;
+      }
     }
+
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
