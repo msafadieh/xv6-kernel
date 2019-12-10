@@ -11,10 +11,14 @@
 
 
 void freerange(void *pa_start, void *pa_end);
-void initrefs(uint64 pa_start, uint64 pa_end);
+void initrefs();
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
+
+#define GETFRAME(n) \
+  (PGROUNDDOWN((uint64)n) - (uint64)end) / PGSIZE
+int PGMAX = 0;
 
 struct run {
   struct run *next;
@@ -26,47 +30,36 @@ struct {
 } kmem;
 
 struct {
+  int init;
   struct spinlock lock;
   int* list;
-  uint64 offset;
 } refs;
 
-int refs_initialized = 0;
-
-#define GETFRAME(n) \
-  (PGROUNDDOWN((uint64)n) - refs.offset) / PGSIZE
 
 void
 kinit()
 {
+  refs.init = 0;
   initlock(&kmem.lock, "kmem");
   initlock(&refs.lock, "refs");
-  initrefs((uint64) end, (uint64)PHYSTOP);
-  freerange((void*)refs.offset, (void*)PHYSTOP);
+  freerange((void*) end, (void*)PHYSTOP);
+  initrefs();
 }
 
 void
-initrefs(uint64 pa_start, uint64 pa_end)
+initrefs()
 {
-  acquire(&refs.lock);
-  int maxframe = 0;
-  refs.list = (int*)PGROUNDUP(pa_start);
-
-  for(uint64 p = (uint64) refs.list; p + PGSIZE <= pa_end; p += PGSIZE) {
-    maxframe++;
+  for (uint64 sz = 0; sz < sizeof(int)*PGMAX; sz += PGSIZE) {
+    refs.list = (int*) kalloc();
+    if (!refs.list)
+      panic("kalloc");
   }
 
-  refs.offset = (uint64) refs.list;
-  for (uint64 sz = 0; sz < sizeof(int)*maxframe; sz += PGSIZE) {
-    refs.offset += PGSIZE;
-  }
-
-  for (int i = 0; i < maxframe; i++) {
+  for (int i = 0; i < PGMAX; i++) {
     refs.list[i] = 0;
   }
 
-  refs_initialized = 1;
-  release(&refs.lock);
+  refs.init = 1;
 }
 
 void
@@ -74,8 +67,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
     kfree(p);
+    PGMAX += 1;
+  }
 }
 
 void
@@ -108,20 +103,18 @@ void
 kfree(void *pa)
 {
   struct run *r;
-  int left;
 
-  acquire(&refs.lock);
-  if (refs_initialized) {
-    left = --refs.list[GETFRAME(pa)];
+  if (refs.init) {
+    int left;
+    uint64 frame = GETFRAME(pa);
 
-    if (left < 0)
-      refs.list[GETFRAME(pa)] = 0;
-  } else {
-    left = 0;
+    acquire(&refs.lock);
+    if ((left = --refs.list[frame]) < 0)
+      refs.list[frame] = 0;
+    release(&refs.lock);
+    if (left > 0) return;
+
   }
-  release(&refs.lock);
-
-  if (left > 0) return;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -153,11 +146,12 @@ kalloc(void)
 
   if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
-
+      
+    if (refs.init) {
       acquire(&refs.lock);
-      if (refs_initialized)
-        refs.list[GETFRAME(r)] = 1;
+      refs.list[GETFRAME(r)] = 1;
       release(&refs.lock);
+    }
   }
   return (void*)r;
 }
