@@ -9,7 +9,9 @@
 #include "riscv.h"
 #include "defs.h"
 
+
 void freerange(void *pa_start, void *pa_end);
+void initrefs(uint64 pa_start, uint64 pa_end);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
@@ -23,11 +25,48 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct {
+  struct spinlock lock;
+  int* list;
+  uint64 offset;
+} refs;
+
+int refs_initialized = 0;
+
+#define GETFRAME(n) \
+  (PGROUNDDOWN((uint64)n) - refs.offset) / PGSIZE
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  initlock(&refs.lock, "refs");
+  initrefs((uint64) end, (uint64)PHYSTOP);
+  freerange((void*)refs.offset, (void*)PHYSTOP);
+}
+
+void
+initrefs(uint64 pa_start, uint64 pa_end)
+{
+  acquire(&refs.lock);
+  int maxframe = 0;
+  refs.list = (int*)PGROUNDUP(pa_start);
+
+  for(uint64 p = (uint64) refs.list; p + PGSIZE <= pa_end; p += PGSIZE) {
+    maxframe++;
+  }
+
+  refs.offset = (uint64) refs.list;
+  for (uint64 sz = 0; sz < sizeof(int)*maxframe; sz += PGSIZE) {
+    refs.offset += PGSIZE;
+  }
+
+  for (int i = 0; i < maxframe; i++) {
+    refs.list[i] = 0;
+  }
+
+  refs_initialized = 1;
+  release(&refs.lock);
 }
 
 void
@@ -39,6 +78,28 @@ freerange(void *pa_start, void *pa_end)
     kfree(p);
 }
 
+void
+decrease_reference(uint64 pa) {
+  int busy;
+
+  acquire(&refs.lock);
+  busy = --refs.list[GETFRAME(pa)];
+  release(&refs.lock);
+
+  if (!busy) {
+    kfree((void*) pa);
+  }
+
+}
+
+void
+increase_reference(uint64 pa) {
+  acquire(&refs.lock);
+  refs.list[GETFRAME(pa)]++;
+  release(&refs.lock);
+
+}
+
 // Free the page of physical memory pointed at by v,
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
@@ -47,6 +108,20 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int left;
+
+  acquire(&refs.lock);
+  if (refs_initialized) {
+    left = --refs.list[GETFRAME(pa)];
+
+    if (left < 0)
+      refs.list[GETFRAME(pa)] = 0;
+  } else {
+    left = 0;
+  }
+  release(&refs.lock);
+
+  if (left > 0) return;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -76,7 +151,13 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+
+      acquire(&refs.lock);
+      if (refs_initialized)
+        refs.list[GETFRAME(r)] = 1;
+      release(&refs.lock);
+  }
   return (void*)r;
 }
