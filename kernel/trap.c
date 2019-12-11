@@ -41,17 +41,15 @@ handlecow(pagetable_t pagetable, pte_t* pte, uint64 va) {
   old = PTE2PA(*pte);
   new = (uint64) kalloc();
 
-  if (!new) {
+  if (!new)
     panic("kalloc");
-  }
 
   // copy memory from old to new
   memmove((char*)new, (char*)old, PGSIZE);
 
   // map PTE to new PA 
-  if (mappages(pagetable, va, PGSIZE, new, flags)) {
+  if (mappages(pagetable, va, PGSIZE, new, flags))
     panic("mappages");
-  }
 
   // decrease reference to old PA
   decrease_reference(old);
@@ -100,11 +98,15 @@ usertrap(void)
     uint64 va = PGROUNDDOWN(r_stval());
 
     if (va < MAXVA) {
+
       pte_t* pte = walk(p->pagetable, va, 0);
+
+      // checks PTE is a copy
       if (pte && (*pte & PTE_C)) {
         handlecow(p->pagetable, pte, va);
         p->killed = 0;
       }
+
     }
 
   } else if((which_dev = devintr()) != 0){

@@ -11,14 +11,13 @@
 
 
 void freerange(void *pa_start, void *pa_end);
-void initrefs();
+void* initrefs();
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
 #define GETFRAME(n) \
   (PGROUNDDOWN((uint64)n) - (uint64)end) / PGSIZE
-int PGMAX = 0;
 
 struct run {
   struct run *next;
@@ -30,36 +29,47 @@ struct {
 } kmem;
 
 struct {
-  int init;
   struct spinlock lock;
-  int* list;
+  uint32* list;
 } refs;
 
 
 void
 kinit()
 {
-  refs.init = 0;
+  void* start = initrefs();
   initlock(&kmem.lock, "kmem");
-  initlock(&refs.lock, "refs");
-  freerange((void*) end, (void*)PHYSTOP);
-  initrefs();
+  freerange(start, (void*)PHYSTOP);
 }
 
-void
+void*
 initrefs()
 {
-  for (uint64 sz = 0; sz < sizeof(int)*PGMAX; sz += PGSIZE) {
-    refs.list = (int*) kalloc();
+  // aligns start and end and finds page number
+  uint64 max = (PGROUNDDOWN(PHYSTOP) - PGROUNDUP((uint64)end)) / PGSIZE;
+  uint64 p = PGROUNDUP((uint64)end);
+  refs.list = 0;
+
+  for (uint64 sz = 0; sz < sizeof(uint32)*max; sz += PGSIZE) {
+
+    // panic if not enough memory
+    if (p + PGSIZE >= PHYSTOP)
+      panic("initrefs");
+
+    // array pointer 
     if (!refs.list)
-      panic("kalloc");
+      refs.list = (uint32*) p;
+    
+    p += PGSIZE;
   }
 
-  for (int i = 0; i < PGMAX; i++) {
+  for (uint64 i = 0; i < max; i++) {
     refs.list[i] = 0;
   }
 
-  refs.init = 1;
+  initlock(&refs.lock, "refs");
+
+  return (void*) p;
 }
 
 void
@@ -67,24 +77,19 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
-    PGMAX += 1;
-  }
+
 }
 
 void
 decrease_reference(uint64 pa) {
-  int busy;
-
   acquire(&refs.lock);
-  busy = --refs.list[GETFRAME(pa)];
+  uint32 left = --refs.list[GETFRAME(pa)];
   release(&refs.lock);
 
-  if (!busy) {
+  if (left <= 0)
     kfree((void*) pa);
-  }
-
 }
 
 void
@@ -92,7 +97,6 @@ increase_reference(uint64 pa) {
   acquire(&refs.lock);
   refs.list[GETFRAME(pa)]++;
   release(&refs.lock);
-
 }
 
 // Free the page of physical memory pointed at by v,
@@ -104,17 +108,16 @@ kfree(void *pa)
 {
   struct run *r;
 
-  if (refs.init) {
-    int left;
-    uint64 frame = GETFRAME(pa);
+  int left;
+  uint64 frame = GETFRAME(pa);
 
-    acquire(&refs.lock);
-    if ((left = --refs.list[frame]) < 0)
-      refs.list[frame] = 0;
-    release(&refs.lock);
-    if (left > 0) return;
+  acquire(&refs.lock);
+  if ((left = --refs.list[frame]) < 0)
+    refs.list[frame] = 0;
+  release(&refs.lock);
+  if (left > 0) return;
 
-  }
+
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -146,12 +149,10 @@ kalloc(void)
 
   if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
-      
-    if (refs.init) {
-      acquire(&refs.lock);
-      refs.list[GETFRAME(r)] = 1;
-      release(&refs.lock);
-    }
+
+    acquire(&refs.lock);
+    refs.list[GETFRAME(r)] = 1;
+    release(&refs.lock);
   }
   return (void*)r;
 }
