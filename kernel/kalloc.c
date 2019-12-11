@@ -26,13 +26,8 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  uint32* refs;
 } kmem;
-
-struct {
-  struct spinlock lock;
-  uint32* list;
-} refs;
-
 
 void
 kinit()
@@ -48,7 +43,7 @@ initrefs()
   // aligns start and end and finds page number
   uint64 max = (PGROUNDDOWN(PHYSTOP) - PGROUNDUP((uint64)end)) / PGSIZE;
   uint64 p = PGROUNDUP((uint64)end);
-  refs.list = 0;
+  kmem.refs = 0;
 
   for (uint64 sz = 0; sz < sizeof(uint32)*max; sz += PGSIZE) {
 
@@ -57,17 +52,15 @@ initrefs()
       panic("initrefs");
 
     // array pointer 
-    if (!refs.list)
-      refs.list = (uint32*) p;
+    if (!kmem.refs)
+      kmem.refs = (uint32*) p;
     
     p += PGSIZE;
   }
 
   for (uint64 i = 0; i < max; i++) {
-    refs.list[i] = 0;
+    kmem.refs[i] = 0;
   }
-
-  initlock(&refs.lock, "refs");
 
   return (void*) p;
 }
@@ -84,19 +77,19 @@ freerange(void *pa_start, void *pa_end)
 
 void
 decrease_reference(uint64 pa) {
-  acquire(&refs.lock);
-  uint32 left = --refs.list[GETFRAME(pa)];
-  release(&refs.lock);
+  acquire(&kmem.lock);
+  uint32 left = --kmem.refs[GETFRAME(pa)];
+  release(&kmem.lock);
 
-  if (left <= 0)
+  if (!left)
     kfree((void*) pa);
 }
 
 void
 increase_reference(uint64 pa) {
-  acquire(&refs.lock);
-  refs.list[GETFRAME(pa)]++;
-  release(&refs.lock);
+  acquire(&kmem.lock);
+  kmem.refs[GETFRAME(pa)]++;
+  release(&kmem.lock);
 }
 
 // Free the page of physical memory pointed at by v,
@@ -111,16 +104,17 @@ kfree(void *pa)
   int left;
   uint64 frame = GETFRAME(pa);
 
-  acquire(&refs.lock);
-  if ((left = --refs.list[frame]) < 0)
-    refs.list[frame] = 0;
-  release(&refs.lock);
-  if (left > 0) return;
-
 
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+  
+  acquire(&kmem.lock);
+  left = --kmem.refs[frame];
+  release(&kmem.lock);
+  
+  if (left)
+    return;
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -143,16 +137,13 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    kmem.refs[GETFRAME(r)] = 1;
+  }
   release(&kmem.lock);
 
-  if(r) {
+  if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
-
-    acquire(&refs.lock);
-    refs.list[GETFRAME(r)] = 1;
-    release(&refs.lock);
-  }
   return (void*)r;
 }
