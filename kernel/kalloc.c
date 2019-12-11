@@ -110,7 +110,8 @@ kfree(void *pa)
     panic("kfree");
   
   acquire(&kmem.lock);
-  left = --kmem.refs[frame];
+  if ((left = kmem.refs[frame]))
+    left = --kmem.refs[frame];
   release(&kmem.lock);
   
   if (left)
