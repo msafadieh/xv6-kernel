@@ -101,7 +101,7 @@ kfree(void *pa)
 {
   struct run *r;
 
-  int left;
+  uint32 left;
   uint64 frame = GETFRAME(pa);
 
 
