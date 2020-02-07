@@ -26,7 +26,7 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-  uint32* refs;
+  uint64* refs;
 } kmem;
 
 void
@@ -45,7 +45,7 @@ initrefs()
   uint64 p = PGROUNDUP((uint64)end);
   kmem.refs = 0;
 
-  for (uint64 sz = 0; sz < sizeof(uint32)*max; sz += PGSIZE) {
+  for (uint64 sz = 0; sz < sizeof(uint64)*max; sz += PGSIZE) {
 
     // panic if not enough memory
     if (p + PGSIZE >= PHYSTOP)
@@ -53,7 +53,7 @@ initrefs()
 
     // array pointer 
     if (!kmem.refs)
-      kmem.refs = (uint32*) p;
+      kmem.refs = (uint64*) p;
     
     p += PGSIZE;
   }
@@ -78,7 +78,7 @@ freerange(void *pa_start, void *pa_end)
 void
 decrease_reference(uint64 pa) {
   acquire(&kmem.lock);
-  uint32 left = --kmem.refs[GETFRAME(pa)];
+  uint64 left = --kmem.refs[GETFRAME(pa)];
   release(&kmem.lock);
 
   if (!left)
